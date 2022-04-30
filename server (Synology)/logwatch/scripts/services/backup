@@ -1,0 +1,213 @@
+#!/bin/perl
+# GPL $Id$
+# script for BACK logwatch for service backup
+
+# example:
+#  export show_only_server=truus.lan.vonk
+#  logwatch --archives --range yesterday \
+#           --hostname back.vonk --service backup --mailto root
+
+$ShowOnlyServer    = $ENV{'show_only_server'}    || "";
+$ShowSuccess       = $ENV{'show_successful'}     || 1;
+$ShowFailed        = $ENV{'show_failed'}         || 1;
+$ShowIOerror       = $ENV{'show_io_error'}       || 1;
+$ShowVanishedFiles = $ENV{'show_vanished_files'} || 1;
+$ShowFailedFiles   = $ENV{'show_failed_files'}   || 1;
+$ShowDiskFree      = $ENV{'show_disk_free'}      || 1;
+$ShowStored        = $ENV{'show_stored'}         || 1;
+$ShowUnmatched     = $ENV{'show_unmatched'}      || ( $ShowOnlyServer eq "" );
+
+
+sub showServer {
+    my($server) = @_;
+    return ( length($ShowOnlyServer) == 0 or ( $ShowOnlyServer eq $server ) );
+}
+
+
+while (defined($ThisLine = &lt;STDIN&gt;)) {
+
+    if ( ($Server,$Service) = 
+	 ($ThisLine =~ /RSYNC daemon not running on \'rsync:\/\/(.*?)\/(.*?)\'/i ) ) {
+
+	$CurrServer="";
+	$CurrService="";
+	if ( showServer($Server) ) {
+	    $Failed-&gt;{$Server}-&gt;{$Service}++;
+	}
+
+    } elsif ( ($Server,$Service) = 
+	      ($ThisLine =~ /rsync-backup: rsync:\/\/(.*?)\/(.*?)$/i ) ) {
+
+	$CurrServer=$Server;
+	$CurrService=$Service;
+	if ( showServer($Server) ) {
+	    $Success-&gt;{$Server}-&gt;{$Service}++;
+	}
+
+    } elsif ( ($FileName,$Service) = ($ThisLine =~ /file has vanished: \"(.*?)\" \(in (.*?)\).*$/i ) ) {
+
+	if ( showServer($Server) ) {
+	    $VanishedFiles-&gt;{$CurrServer}-&gt;{$Service}-&gt;{$FileName}++;
+	}
+
+    } elsif ( ($FileName,$Service) = ($ThisLine =~ /rsync: read errors mapping \"(.*?)\" \(in (.*?)\):.*$/i ) ) {
+
+	if ( showServer($Server) ) {
+	    $FailedFiles-&gt;{$CurrServer}-&gt;{$Service}-&gt;{$FileName}++;
+	}
+
+    } elsif ( ($ThisLine =~ /IO error encountered -- skipping file deletion/ ) ) {
+	if ( showServer($Server) ) {
+	    $IOerror-&gt;{$CurrServer}-&gt;{$CurrService}++;
+	}
+
+    } elsif ( ($Date,$Server,$Service,$Period) = 
+	      ($ThisLine =~ /stored backups: (.*?) (.*?)\/(.*?)\/(.*?)$/i )) {
+
+	if ( showServer($Server) ) {
+	    $StoredBackup-&gt;{$Server}-&gt;{$Service}-&gt;{$Period} = $Date;
+	}
+
+    } elsif ( ($ThisLine =~ /ERROR: file corruption in/ ) or
+	      ($ThisLine =~ /rsync error: some files could not be transferred/ ) or
+	      ($ThisLine =~ /rsync: failed to connect to nis.vonk/ ) or
+	      ($ThisLine =~ /rsync error: error in socket IO \(code 10\) at clientserver.c/ ) or
+	      ($ThisLine =~ /--help/ ) or 
+	      ($ThisLine =~ /rsync-backup: ERROR:/ ) ) {
+	# ignore
+
+    } elsif ( ($ThisLine =~ /Filesystem/ ) or
+	      ($ThisLine =~ /\/dev\/md0/ ) ) {
+	push @DiskFreeList,$ThisLine;
+
+    } else {
+	# Report any unmatched entries...
+	push @OtherList,$ThisLine;
+    }
+}
+
+
+if ($ShowSuccess) {
+    if (keys %{$Success}) {
+	print "\nSuccessful Backups:\n";
+	foreach	$Server (sort {$a cmp $b} keys %{$Success}) {
+	    foreach $Service (sort {$a cmp $b} keys %{$Success-&gt;{$Server}}) {
+		print "\t" . $Server . "/" . $Service;
+		$count = $Success-&gt;{$Server}-&gt;{$Service};
+		if ( $count &gt; 1 ) {
+		    print " (" . $count . " times)";
+		} 
+		print "\n";
+	    }
+	}
+    }
+}
+
+if ($ShowFailed) {
+    if (keys %{$Failed}) {
+	print "\nFailed Backups:\n";
+	foreach	$Server (sort {$a cmp $b} keys %{$Failed}) {
+	    foreach $Service (sort {$a cmp $b} keys %{$Failed-&gt;{$Server}}) {
+		print "\t" . $Server . "/" . $Service;
+		$count = $Failed-&gt;{$Server}-&gt;{$Service};
+		if ( $count &gt; 1 ) {
+		    print " (" . $count . " times)";
+		} 
+		print "\n";
+	    }
+	}
+    }
+}
+
+if ($ShowFailedFiles) {
+    if (keys %{$FailedFiles}) {
+	print "\nFiles skipped due to file locking:\n";
+	foreach	$Server (sort {$a cmp $b} keys %{$FailedFiles}) {
+	    foreach $Service (sort {$a cmp $b} keys %{$FailedFiles-&gt;{$Server}}) {
+		print "\t" . $Server . "/" . $Service . "\n";
+		foreach $FileName (sort {$a cmp $b} keys %{$FailedFiles-&gt;{$Server}-&gt;{$Service}}) {
+		    print "\t\t";
+		    my $len=length($FileName);
+		    if ( $len &gt; 40 ) {
+			print ".." . substr( $FileName, $len - 38, 38);
+		    } else {
+			print $Filename;
+		    }
+		    $count = $FailedFiles-&gt;{$Server}-&gt;{$Service}-&gt;{$FileName};
+		    if ( $count &gt; 1 ) {
+			print " (" . $count . " times)";
+		    } 
+		    print "\n";
+		}
+	    }
+	}
+    }
+}
+
+if ($ShowIOerror) {
+    if (keys %{$IOerror}) {
+	print "\nOld files not deleted as a precaution for an IO error:\n";
+	foreach	$Server (sort {$a cmp $b} keys %{$IOerror}) {
+	    foreach $Service (sort {$a cmp $b} keys %{$IOerror-&gt;{$Server}}) {
+		print "\t" . $Server . "/" . $Service;
+		$count = $IOerror-&gt;{$Server}-&gt;{$Service};
+		if ( $count &gt; 1 ) {
+		    print " (" . $count . " times)";
+		} 
+		print "\n";
+	    }
+	}
+    }
+}
+
+if ($ShowVanishedFiles) {
+    if (keys %{$VanishedFiles}) {
+	print "\nFiles that vanished:\n";
+	foreach	$Server (sort {$a cmp $b} keys %{$VanishedFiles}) {
+	    foreach $Service (sort {$a cmp $b} keys %{$VanishedFiles-&gt;{$Server}}) {
+		print "\t" . $Server . "/" . $Service . "\n";
+		foreach $FileName (sort {$a cmp $b} keys %{$VanishedFiles-&gt;{$Server}-&gt;{$Service}}) {
+		    print "\t\t";
+		    my $len=length($FileName);
+		    if ( $len &gt; 40 ) {
+			print ".." . substr( $FileName, $len - 38, 38);
+		    } else {
+			print $Filename;
+		    }
+		    $count = $VanishedFiles-&gt;{$Server}-&gt;{$Service}-&gt;{$FileName};
+		    if ( $count &gt; 1 ) {
+			print " (" . $count . " times)";
+		    } 
+		    print "\n";
+		}
+	    }
+	}
+    }
+}
+
+if ($ShowStored) {
+    if (keys %{$StoredBackup}) {
+	print "\nStored Backups:\n";
+	foreach	$Server (sort {$a cmp $b} keys %{$StoredBackup}) {
+	    foreach $Service (sort {$a cmp $b} keys %{$StoredBackup-&gt;{$Server}}) {
+		print "\t" . $Server . "/" . $Service . "\n";
+		foreach $Period (sort {$a cmp $b} keys %{$StoredBackup-&gt;{$Server}-&gt;{$Service}}) {
+		    print "\t\t" . $StoredBackup-&gt;{$Server}-&gt;{$Service}-&gt;{$Period} . 
+			" (" . $Period . ")\n";
+		}
+	    }
+	}
+    }
+}
+
+if (($ShowDiskFree) and ($#DiskFreeList &gt;= 0)) {
+    print "\nDisk Space:\n\n";
+    print @DiskFreeList;
+}
+
+if (($#OtherList &gt;= 0) and ($ShowUnmatched)) {
+   print "\n**Unmatched Entries**\n";
+   print @OtherList;
+}
+
+exit(0);

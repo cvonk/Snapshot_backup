@@ -1,0 +1,23 @@
+- /Default/
+- /Default User/
+- /HelpAssistant/
+- /LocalService/
+- /NetworkService/
+- /All Users/Microsoft/Windows Defender/
+- /All Users/Microsoft/Search/
+- /All Users/Microsoft/RAC/
+- /All Users/Microsoft/eHome/
+- /All Users/Microsoft/Windows NT/MSFax/
+- /*/NTUSER.DAT*
+- /*/ntuser.dat*
+- /*/AppData/
+- /*/Application Data/
+- /*/Local Settings/
+- /*/My Documents/
+- /*/NetHood/
+- /*/PrintHood/
+- /*/Recent/
+- /*/Searches/
+- /Public/
+- /defaultuser*
+- /postgres

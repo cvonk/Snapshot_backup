@@ -1,0 +1,5 @@
+- @eaDir
+- #recycle/
+- $RECYCLE.BIN
+- /Documents/.emacs.d/auto-save-list/
+- /Documents/.bash_history

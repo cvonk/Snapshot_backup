@@ -1,0 +1,43 @@
+#/bin/bash
+# GPL $Id$
+echo "start cron job" | /bin/logger -s -t backup -p error
+
+LOGGER=/bin/logger
+CONFIG_DIR=${HOME}/config
+RSYNC_BACKUP=${HOME}/bin/backup-using-rsync
+BACKUP_DIR=${HOME}/data
+AWK=/bin/awk
+DF=/bin/df
+PASSWD_FILE=${HOME}/.rsync.passwd
+LS=/bin/ls
+SED=/bin/sed
+
+echo "Starting $0 ..."
+echo "Starting $0 ..." | $LOGGER -s -t backup -p error
+echo $USER
+whoami
+
+if [ `whoami` != "backup" ]; then
+	echo "This script must be run as backup" 1>&2
+	exit 1
+fi
+
+IFS=$(echo -en "\n\b")
+
+pushd ${CONFIG_DIR} 
+for node in */* ; do
+   echo "${node}"
+   $RSYNC_BACKUP \
+        --password-file=${PASSWD_FILE} \
+	--exclude-from="${CONFIG_DIR}/${node}" \
+	$* \
+	"${node}" \
+	"${BACKUP_DIR}/${node}" 2>&1 | $LOGGER -s -t backup -p error
+done
+popd
+
+$DF -h  ${BACKUP_DIR} 2>&1 | $LOGGER -s -t backup -p error
+$DF -hi ${BACKUP_DIR} 2>&1 | $LOGGER -s -t backup -p error
+( cd ${BACKUP_DIR} ; $LS -dl --quote-name --time-style=long-iso */*/* | awk '{ printf("stored backups: %08s ", $6); for (i=8;i<=NF;i++){printf "%s ", $i}; printf "\n"; }' ) | $LOGGER -s -t backup -p error
+
+echo "Done $0 .."

@@ -1,0 +1,3 @@
+.rsyncd.secrets
+sql_backup/*.cnf
++ sql_backup/.example.cnf

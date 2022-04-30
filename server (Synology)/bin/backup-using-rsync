@@ -1,0 +1,582 @@
+#!/bin/bash
+# GPL $Id$
+# ----------------------------------------------------------------------
+# rotating-filesystem-snapshot utility using 'rsync'
+#
+# inspired by http://www.mikerubel.org/computers/rsync_snapshots
+# ----------------------------------------------------------------------
+# probably still runs under /bin/ash if you want ..
+
+#set -o nounset  # do not allow uninitialized variables
+#set -o errexit  # exit if any statement returns an error value
+
+
+# ------------- file locations -----------------------------------------
+
+#SNAPSHOT_DEV="/dev/sda2"
+SNAPSHOT_DIR=~backup/data
+LOCKFILE=~backup/`basename $0`.pid
+
+# ------------- system commands used by this script --------------------
+
+ECHO=/bin/echo
+CUT=/bin/cut
+PING=/bin/ping
+GREP=/bin/grep
+SED=/bin/sed
+AWK=/bin/awk
+PS=/bin/ps
+DIRNAME=/bin/dirname
+DATE=/bin/date
+
+# after parsing the command line parameters, these the following commands
+# will be prefixed with $DRY
+
+
+#MOUNT=/bin/mount
+MKDIR=/bin/mkdir
+CHMOD=/bin/chmod
+RM=/bin/rm
+MV=/bin/mv
+CP=/bin/cp
+TOUCH=/bin/touch
+RSYNC=/bin/rsync
+
+# ------------- other local variables ----------------------------------
+
+PROGRAM=`basename $0`
+USAGE="
+Usage: $PROGRAM [--parameters] SRC DST
+    --verbose              - increase verbosity
+    --quiet                - decrease verbosity
+    --exclude=PATTERN      - exclude files matching PATTERN
+    --exclude-from=FILE    - patterns listed in FILE
+    --include-from=FILE    - don't exclude patterns listed in FILE
+    --dry-run              - do not start any file transfers
+                             just report the actions it would have taken
+    --remove-last-daily    - remove the last backup
+    --version              - shows revision number
+Example:
+    $PROGRAM --verbose --exclude-from=/etc/backup/hostname/module rsync://hostname/module $SNAPSHOT_DIR/hostname/module
+"
+
+# ------------- the script itself --------------------------------------
+
+
+usage() {
+    $ECHO "$USAGE"
+}
+
+case "$1" in
+    --help|"")
+    	usage
+    	exit 0
+    	;;
+    --version)
+        REVISION=`$ECHO '$Revision 0.1$'|tr -cd '0-9.'`
+        $ECHO "$PROGRAM version $REVISION"
+        exit 0
+        ;;
+    --help)
+        usage
+        exit 0
+        ;;
+esac
+
+# ------ print the error message to stderr, and remount r/o-------------
+
+
+die() {
+    $ECHO "$PROGRAM: $*"
+    $ECHO "use '$PROGRAM --help' for help"
+    #$MOUNT -t ext3 -o remount,ro $SNAPSHOT_DEV $SNAPSHOT_DIR
+    exit 1
+}
+
+# ------ execute a command, and exit on error --------------------------
+
+
+checkExit() {
+#    $* || die "ERROR: $*"
+     "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" || die "ERROR: $*"
+}
+
+# ----- returns 0 if $LOCKFILE exists, 1 otherwise ---------------------
+
+
+removeOldLock() {
+    if [ -e ${LOCKFILE} ] ; then
+        a=`cat ${LOCKFILE}`                                                                                                                   
+        if ! `$PS | $AWK "\\$1 == \"$a\" { exit 1 }"` ; then                                                                                    
+            $ECHO "$PROGRAM:isLocked: WARNING cleaning old lockfile"                                                                          
+            rm -f $LOCKFILE                                                                                                                   
+        fi
+    fi                                                                                                                                    
+}
+
+isLockedOBSOLETE() {
+    if [ ! -e $LOCKFILE ] ; then
+        return 0
+    fi
+
+   # if the process that created the lock is dead, then cleanup its lockfile     
+   a=`cat ${LOCKFILE}`                                                 
+   if ! `$PS | $AWK "\\$1 == \"$a\" { exit 1 }"` ; then
+       $ECHO "$PROGRAM:isLocked: WARNING cleaning old lockfile"
+       rm -f $LOCKFILE                                         
+       return 0;                                                       
+   fi                                                 
+                                                                   
+   return 1;
+}
+
+
+# ------- cleanup TERM, EXIT and INT traps -----------------------------
+
+cleanup() {
+    trap - EXIT HUP INT QUIT TERM
+
+    if [ -e $LOCKFILE ] ; then    
+        LOCKFILE_PROCID=`cat $LOCKFILE`
+        if [ "$$" = "$LOCKFILE_PROCID" ] ; then
+            $RM -f $LOCKFILE
+        else
+            $ECHO "$PROGRAM: Can't remove lockfile ($LOCKFILE)"
+            $ECHO "process $LOCKFILE_PROCID created the lock, while this process is $$)"
+        fi
+    fi
+    exit $1
+}
+
+
+# ----- print to stdout when the debug level $VERB >= $1 ---------------
+
+verbose() {
+    local LEVEL="$1"
+    [ ! -z "$LEVEL" ] || die "verbose: unspecified LEVEL"
+
+    if [ $VERB -ge $LEVEL ] ; then
+        shift
+        echo "$PROGRAM: $*"
+    fi
+}
+
+
+# ------ prints directory, if debug level $VERB >= $1 ------------------
+
+
+verbose_ls() {
+    [ $VERB -lt $1 ] || ( shift ; ls -l "$*/" )
+}
+
+
+# --- returns 0 if rsyncd is running on host $1, 1 otherwise -----------
+
+rsyncRunningOnRemote() {
+    local SOURCE=$1
+    local HOSTNAME
+
+    [ ! -z "$SOURCE" ] || die "rsyncRunningOnRemote: unspecified source"
+
+    # was if $ECHO $SOURCE | grep '^rsync://'  2>/dev/null >/dev/null ; then
+
+        if [ -z "$SSH" ] ; then
+            HOSTNAME=`$ECHO "$SOURCE" | $CUT -d/ -f3`:
+        else
+            HOSTNAME=`$ECHO "$SOURCE" | $CUT -d: -f1`
+        fi
+        echo $HOSTNAME >&2
+        if $RSYNC $SSH $PWDFILE $HOSTNAME:  2>/dev/null >/dev/null ; then
+            return 0
+        else
+            return 1
+        fi
+#    else
+#        return 1
+#    fi
+}
+
+# ------ returns the name of the oldest daily/weekly backup directory --
+
+
+findOldest() {
+    local TYPE="$1"
+    local ALL_DAILY
+    local OLDEST_DAILY
+
+    [ ! -z "$TYPE" ] || die "findOldest: unspecified duration {daily|weekly}"
+
+    ALL_DAILY=`ls -d -r "$DST/$TYPE".* 2>/dev/null`
+    OLDEST_DAILY=`$ECHO $ALL_DAILY | $SED "s,^$DST/,," | $CUT -d' ' -f1`
+
+    echo $OLDEST_DAILY
+}
+
+# ----- returns 0 if weekly backup should be made, 1 otherwise ---------
+
+
+shouldMakeWeeklyBackup() {
+    local OLDEST_DAILY
+    local TODAY_DAY TODAY_YEAR
+    local OLDEST_DAILY_DAY OLDEST_DAILY_YEAR
+
+    OLDEST_DAILY=`findOldest daily`
+
+    # no point in making a weekly backup, if there is no daily one
+    if [ -z $OLDEST_DAILY ] ; then
+        return 1
+    fi
+
+    # only make a weekly backup if the oldest daily backup is at least 7 days old
+
+    TODAY_DAY=`$DATE +%j | $SED 's/^0*//g'` # leading 0 would represent Octal
+    TODAY_YEAR=`$DATE +%Y`
+
+    OLDEST_DAILY_DAY=`$DATE -r "$DST/$OLDEST_DAILY" +%j | $SED 's/^0*//g'`
+    OLDEST_DAILY_YEAR=`$DATE -r "$DST/$OLDEST_DAILY" +%Y`
+
+
+#$DATE -r "$DST/$OLDEST_DAILY" +%j | $SED 's/^0*//g' >&2
+#echo OLDEST_DAILY_DAY=${OLDEST_DAILY_DAY} >&2
+#echo OLDEST_DAILY_YEAR=${OLDEST_DAILY_YEAR} >&2
+
+    DAY_OF_FIRST_WEEKLY=$((OLDEST_DAILY_DAY+7))
+
+    if [ $TODAY_YEAR -ne $OLDEST_DAILY_YEAR ] ; then
+        TODAY_DAY=$((TODAY_DAY+356*(TODAY_YEAR-OLDEST_DAILY_YEAR)))
+    fi
+
+    if [ $TODAY_DAY -lt $DAY_OF_FIRST_WEEKLY ] ; then
+        verbose 2 "No weekly backup, $TODAY_DAY -lt $DAY_OF_FIRST_WEEKLY"
+        return 1
+    fi
+
+    # make a weekly backup, if the last weekly backup was >= 14 days ago, or
+    # there was no last weekly backup.
+
+    TODAY_DAY=`$DATE +%j | $SED 's/^0*//g'`
+    TODAY_YEAR=`$DATE +%Y`
+
+    if [ -d "$DST/weekly.0" ] ; then
+        LAST_WEEKLY_DAY=`$DATE -r "$DST/weekly.0" +%j | $SED 's/^0*//g'`
+        LAST_WEEKLY_YEAR=`$DATE -r "$DST/weekly.0" +%Y`
+    else
+        LAST_WEEKLY_DAY=0
+        LAST_WEEKLY_YEAR=0
+    fi
+
+    DAY_OF_NEXT_WEEKLY=$((LAST_WEEKLY_DAY+14))
+    if [ $TODAY_YEAR -ne $LAST_WEEKLY_YEAR ] ; then
+        TODAY_DAY=$((TODAY_DAY+365))
+    fi
+
+    if [ $TODAY_DAY -ge $DAY_OF_NEXT_WEEKLY ] ; then
+        verbose 2 "Weekly backup, today($TODAY_DAY) -ge next($DAY_OF_NEXT_WEEKLY)"
+        return 0
+    else
+        verbose 2 "No weekly backup, today($TODAY_DAY) -ge next($DAY_OF_NEXT_WEEKLY)"
+        return 1
+    fi
+}
+
+
+# ----- renumber the $1 {daily,weekly} backups, starting at $2 ---------
+
+
+renumber() {
+    local TYPE="$1"
+    local START="$2"
+
+    [ ! -z "$TYPE" ] || die "renumber: missing TYPE"
+    [ ! -z "$START" ] || die "renumber: missing START"
+
+    [ "$TYPE" = "daily" ] || [ "$TYPE" = "weekly" ] || die "renumber: incorrect TYPE"
+
+echo RENUMBER
+
+    for item in "$DST/$TYPE".* ; do
+    	$MV "$item" "$item.tmp"
+    done
+     
+    COUNT=$START
+    for item in "$DST/$TYPE".* ; do
+    	ITEM_NEW=`$DIRNAME "$item"`/$TYPE.$COUNT
+    	$MV "$item" "$ITEM_NEW"
+        COUNT=$((COUNT+1))
+    done    	
+}
+
+# ----- create the backup ------------------------------------ ---------
+
+
+backup() {
+    local OLDEST_DAILY
+
+#echo 1
+#echo \"$DST\"
+#    echo $MKDIR -p "$DST" || die "backup: $MKDIR -p $DST"
+#echo 2
+
+    verbose 2 "STEP 0: the status quo"
+    verbose_ls 2 "$DST"
+
+    if shouldMakeWeeklyBackup ; then
+
+        verbose 2 "STEP 1: delete weekly.2 backup, if it exists"
+    
+        if [ -d "$DST/weekly.2" ] ; then
+            $RM -rf "$DST/weekly.2"
+        fi ;
+    
+        verbose_ls 2 "$DST"
+        verbose 2 "STEP 2: shift the middle weekly backups(s) back by one,"\
+                  "if they exist"
+    
+        renumber weekly 1
+
+        verbose_ls 2 "$DST"
+
+        OLDEST_DAILY=`findOldest daily`
+#echo OLDEST_DAILY=${OLDEST_DAILY}
+
+        verbose 2 "STEP 3: make a hard-link-only (except for dirs) copy of"\
+                  "$OLDEST_DAILY, into weekly.0"
+
+        if [ -d "$DST/$OLDEST_DAILY" ] ; then
+            #echo $CP -al "$DST/$OLDEST_DAILY" "$DST/weekly.0"
+            $CP -al "$DST/$OLDEST_DAILY" "$DST/weekly.0"
+        fi
+
+        verbose_ls 2 "$DST"
+        
+        # note: do *not* update the mtime of weekly.0; it will reflect
+        # when daily.7 was made, which should be correct.
+    else
+        verbose 2 "STEP 1: no weekly backup needed, skipping STEP 2 and 3"
+    fi
+
+    verbose 2 "STEP 4: delete daily.7 backup, if it exists"
+
+    if [ -d "$DST/daily.7" ] ; then
+        $RM -rf "$DST/daily.7"
+    fi
+    
+    verbose_ls 2 "$DST"
+    verbose 2 "STEP 5: shift the middle backups(s) back by one, if they exist"
+
+    renumber daily 1
+
+    verbose_ls 2 "$DST"
+    verbose 2 "STEP 6: make a hard-link-only (except for dirs) copy of the"\
+          "latest backup, if that exists"
+
+    if [ -d "$DST/daily.1" ] ; then
+        $CP -al "$DST/daily.1" "$DST/daily.0"
+    else
+        $MKDIR -p "$DST/daily.0"
+        $CHMOD 755 "$DST/daily.0"
+    fi;
+
+    verbose_ls 2 "$DST"
+    verbose 2 "STEP 7: rsync from $SRC to $DST/daily.0"
+
+    # (notice that rsync behaves like cp --remove-destination by default, so
+    # the destination is unlinked first.  If it were not so, this would copy
+    # over the other backup(s) too!
+
+    verbose 1 "$RSYNC $SSH $PWDFILE  --archive --delete --delete-excluded $PARAM $SRC $DST/daily.0"
+    verbose 0 "$SRC"
+
+    echo ============================================================
+    echo $DRY $RSYNC $SSH $PWDFILE --archive --delete --delete-excluded $PARAM --exclude-from=\"$EXCLUDEFROM\" \"$SRC\" \"$DST/daily.0\"
+    echo ============================================================
+    
+    # --compress
+    $DRY $RSYNC $SSH $PWDFILE --archive --delete --delete-excluded $PARAM --exclude-from="$EXCLUDEFROM" "$SRC" "$DST/daily.0"
+
+    verbose 1 "$RSYNC done"
+    verbose 2 "STEP 8: update the mtime of daily.0 to reflect the backup time"
+
+    $TOUCH "$DST/daily.0"
+
+    # at the end of the week, the oldest daily backup, becomes last weeks
+    # backup
+
+    verbose_ls 2 "$DST"
+    verbose 1 "STEP 9: done"
+}
+
+# ----- remove the last daily backup -----------------------------------
+
+
+removeLastDaily() {
+    verbose 2 "STEP 1: renumbering daily backups starting at ($DST/daily.0)"
+
+    renumber daily 0
+
+    verbose 2 "STEP 2: deleting the newest backup, if it exists "\
+              "($DST/daily.0)"
+
+    if [ -d "$DST/daily.0" ] ; then
+        $RM -rf "$DST/daily.0"
+
+        verbose 2 "STEP 3: renumbering daily backups starting at "\
+                  "($DST/daily.0)"
+
+        renumber daily 0
+    fi
+}
+
+# ----- remount the file system ----------------------------------------
+
+remount() {
+    local MOUNT_MODE="$1"
+    [ ! -z "$MOUNT_MODE" ] || die "remount, missing MOUNT_MODE"
+
+    #$MOUNT -t ext3 -o remount,$MOUNT_MODE $SNAPSHOT_DEV $SNAPSHOT_DIR
+}
+
+# ------------- trap errors --------------------------------------------
+
+function err_trap_handler()
+{
+	SCRIPTNAME="$0"
+	LASTLINE="$1"
+	LASTERR="$2"
+	
+	die "${SCRIPTNAME}: line ${LASTLINE}: exit status of last command: ${LASTERR}"
+}
+
+# ------------- main ---------------------------------------------------
+
+PARAM=
+VERB=0
+DRY=
+REMOVE_LAST_DAILY=
+SSH=
+PWDFILE=
+SRC=
+DST=
+EXCLUDEFROM=
+
+# trap commands with non-zero exit code
+trap 'err_trap_handler ${LINENO} $?' ERR
+
+while [ -n "$1" ] ; do
+    case $1 in
+         --verbose)
+            shift
+            VERB=$((VERB+1))
+            [ $VERB -ge 2 ] && PARAM="$PARAM --verbose"
+            ;;
+        --quiet)
+            PARAM="$PARAM $1"
+            shift
+            [ $VERB -eq 0 ] || VERB=$((VERB-1))
+            ;;
+        --help | -h)
+            shift;
+            usage
+            exit 1;
+            ;;
+        --dry-run)
+            PARAM="$PARAM $1"
+            shift;
+            DRY="$ECHO"
+            ;;
+        --remove-last-daily)
+            shift;
+            REMOVE_LAST_DAILY=y
+            ;;
+        --password-file*)
+            PWDFILE="$1"
+            shift
+            ;;
+        --exclude-from*)
+            EXCLUDEFROM=${1:15}
+            shift
+            ;;
+        -*)
+            PARAM="$PARAM $1"
+            shift
+            ;;
+        *)
+            if [ -z "$SRC" ] ; then
+			if [[ "$1" == *\.ssh* ]] ; then
+              	  # use rsync over SSH to backup remove hosts
+              	  # assumes that ~/.ssh/config contains the connection info
+              	  #   such as port# and keys to use.
+                  SSH="-e '/bin/ssh'"
+                  PWDFILE=""			# ignore "--password-file"
+                  SRC=${1/\//:}/		# replace / with :
+                  echo RSYNCoSSH SSH=$SSH SRC=$SRC
+                else
+                  # use rsyhostdomain nc protocol to backup hosts on the LAN
+                  SRC=rsync://backup@$1
+                  PARAM="$PARAM --chmod=u=rwx"	# make everything accessible
+                  echo RSYNC PARAM=$PARAM SRC=$SRC
+                fi
+            else
+                if [ -z "$DST" ] ; then
+                    DST=$1
+                else
+                    die "ignoring parameter '$1'"
+                fi
+            fi
+            shift
+	    ;;
+    esac
+done
+
+RSYNC_VERS=`$RSYNC --version | $AWK '$1 == "rsync" && $2 == "version" { print $3 }'`
+
+[ ! -z "$SRC" ] || die "source not specified"
+[ ! -z "$DST" ] || die "destination not specified"
+
+# [ `id -u` = 0 ] || die "only root can do that"
+
+#was:
+#trap 'cleanup' TERM EXIT INT  # catch kill, script exit and int
+
+# The 1st trap removes the lock at the end of the script.  The 2nd trap causes the
+# script to terminate after receiving one of the specified signals.  Before the
+# script terminates, the trap for "signal EXIT" is executed, effectively removing
+# the lock.
+trap 'cleanup' EXIT
+trap 'exit 2' HUP INT QUIT TERM
+
+echo testing for lock
+if [ -z $DRY ] ; then
+    mkdir -p /var/lock
+
+	echo removing old lock
+    removeOldLock
+    
+    	echo creating new lock
+    if ( set -o noclobber ; echo "$$" > $LOCKFILE ) 2> /dev/null ; then
+        trap 'cleanup' TERM EXIT INT  # clean up lockfile at kill, script exit or ^c
+    else
+        die "Failed to acquire lock: $LOCKFILE held by $(cat $LOCKFILE)"
+    fi
+     	echo got the lock
+fi
+
+verbose 2 "Backup '$SRC' -> '$DST'"
+verbose 2 "parameters: '$PARAM'"
+
+if [ ! -z $REMOVE_LAST_DAILY ] ; then
+    removeLastDaily
+    exit 0
+fi
+
+if rsyncRunningOnRemote "$SRC" ; then
+    remount rw
+    backup
+    RET=$?
+    remount ro
+else
+    $ECHO "RSYNC daemon not running on '$SRC'"
+    RET=1
+fi
+
+exit $RET
