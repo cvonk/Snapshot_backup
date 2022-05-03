@@ -10,4 +10,9 @@ Scripts and configuration examples are given for
 - Windows clients (using cygwin)
 - Synology server
 
+
+On synology server,
+- create a regular user named backup, and allow access to rsync
+- enable ssh to admin account, by adding `PermitRootLogin yes` to /etc/sshd_config
+
 [Continue reading](https://coertvonk.com/sw/application/snapshot-backup/snapshap-backup-rsync-479)
