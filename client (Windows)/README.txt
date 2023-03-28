@@ -1,6 +1,6 @@
 Install "cwRsyncServer 4.1.0 Installer" in "C:\Program Files (x86)\rsyncd"
 	acct	backup
-	passwd	iw2bipdx
+	passwd	yourPasswd
 
 Overwrite the bin folder with the binaries from 5.5.0
 
