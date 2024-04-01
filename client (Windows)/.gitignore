@@ -1,3 +1,2 @@
-.rsyncd.secrets
-cwRsync_5.5.0/
-cwRsyncServer_4.1.0/
+rsyncd.secrets
+rsyncd.conf
