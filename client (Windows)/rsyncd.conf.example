@@ -1,6 +1,6 @@
 use chroot = false
 strict modes = false
-hosts allow = backup.vonkio.com ws.vonkio.com linux.vonkio.com localhost
+hosts allow = backup.yourdomain localhost
 auth users = backup
 secrets file = rsyncd.secrets
 log file = rsyncd.log
@@ -21,4 +21,3 @@ gid = 0
   path = /cygdrive/c/Users/recovered/
   read only = no
   list = no
-
